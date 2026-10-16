@@ -5,6 +5,7 @@ import type { TaskiaLoad, TaskiaTask } from '../types'
 
 const PANE = 'taskia-hoy'
 const SERVER = 'MCP_TASKIA'
+const TOOL = 'agent_what_to_do_today'
 const MAX = 30
 const GROUPS = ['Urgente hoy', 'Vencida reciente', 'En curso', 'Vieja / revisar si sigue']
 
@@ -35,12 +36,31 @@ function fallbackGroup(t: Raw): string {
   return ageDays > 60 ? 'Vieja / revisar si sigue' : 'Vencida reciente'
 }
 
+// El nombre del servidor cambia según dónde esté conectado Taskia (en la app de
+// escritorio es un ID), así que se busca entre las herramientas de la sesión.
+async function taskiaServers($: any): Promise<string[]> {
+  const suffix = `__${TOOL}`
+  const found = (await $.tool.list())
+    .map((t: any) => String(t.name))
+    .filter((n: string) => n.startsWith('mcp__') && n.endsWith(suffix))
+    .map((n: string) => n.slice('mcp__'.length, -suffix.length))
+  return found.length > 0 ? found : [SERVER]
+}
+
 async function fetchTasks($: any): Promise<Raw[]> {
-  const res = await $.mcp.call(SERVER, 'agent_what_to_do_today', { limit: 50, include_overdue: true })
-  if (res.isError) throw new Error('Taskia respondió con error')
-  const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
-  const data = JSON.parse(text)
-  return (data.items ?? []) as Raw[]
+  let lastErr: unknown = new Error('Taskia no está conectado en esta sesión')
+  for (const server of await taskiaServers($)) {
+    try {
+      const res = await $.mcp.call(server, TOOL, { limit: 50, include_overdue: true })
+      if (res.isError) throw new Error('Taskia respondió con error')
+      const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
+      const data = JSON.parse(text)
+      return (data.items ?? []) as Raw[]
+    } catch (err) {
+      lastErr = err
+    }
+  }
+  throw lastErr
 }
 
 async function classify($: any, raw: Raw[]): Promise<TaskiaTask[]> {
