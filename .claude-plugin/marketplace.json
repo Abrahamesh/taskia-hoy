@@ -1,0 +1,5 @@
+{
+  "name": "taskia-hoy",
+  "owner": { "name": "Abraham Sifontes" },
+  "plugins": [{ "name": "taskia-hoy", "source": "./" }]
+}
