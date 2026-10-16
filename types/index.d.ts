@@ -14,6 +14,13 @@ export type TaskiaLoad = 'idle' | 'loading' | 'ready' | 'error'
 
 declare module 'claude-code' {
   interface PluginState {
-    'taskia-hoy': { tasks: TaskiaTask[]; load: TaskiaLoad; error: string; updatedAt: string }
+    'taskia-hoy': {
+      tasks: TaskiaTask[]
+      load: TaskiaLoad
+      error: string
+      updatedAt: string
+      brief: string
+      open: string[]
+    }
   }
 }

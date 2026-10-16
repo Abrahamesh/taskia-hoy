@@ -14,10 +14,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('model.complete', async () => ({
       value: {
         isAnswered: true,
-        text: JSON.stringify([
-          { ref: '1', group: 'Urgente hoy', summary: 'Ajustar flujo', advice: 'Revisar ejecución fallida', canDo: true },
-          { ref: '2', group: 'Vieja / revisar si sigue', summary: 'Proyecto viejo', advice: 'Cerrar o archivar', canDo: false },
-        ]),
+        text: JSON.stringify({
+          brief: 'Empieza por el flujo de n8n que vence hoy.',
+          tasks: [
+            { ref: '1', group: 'Urgente hoy', summary: 'Ajustar flujo', advice: 'Revisar ejecución fallida', canDo: true },
+            { ref: '2', group: 'Vieja / revisar si sigue', summary: 'Proyecto viejo', advice: 'Cerrar o archivar', canDo: false },
+          ],
+        }),
         usage: { input_tokens: 1, output_tokens: 1 },
       },
     }) as any)
@@ -25,8 +28,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await $.command.run({ command: 'taskia', args: '' } as any)
     const ui = await $.ui.mount({ plugin: 'taskia-hoy', surface, component: 'Pane', requestId: 'taskia-hoy', props: { title: 'Taskia · Hoy' } as any })
+    // "Urgente hoy" arranca plegado: la tarea no se ve hasta abrir el grupo.
+    let header
+    for (let i = 0; i < 50 && !header; i++) { await sleep(10); await ui.resize?.({ columns: 60, rows: 40 } as any).catch(() => {}); header = await ui.find({ key: 'g-Urgente hoy' }) }
+    expect(header).toBeDefined()
+    expect(await ui.find({ key: 't-1' })).toBeUndefined()
+    await ui.press({ key: 'g-Urgente hoy' })
     let btn
-    for (let i = 0; i < 50 && !btn; i++) { await sleep(10); await ui.resize?.({ columns: 60, rows: 40 } as any).catch(() => {}); btn = await ui.find({ key: 't-1' }) }
+    for (let i = 0; i < 50 && !btn; i++) { await sleep(10); btn = await ui.find({ key: 't-1' }) }
     expect(btn).toBeDefined()
     await ui.press({ key: 't-1' })
     expect(sent.length).toBe(1)
