@@ -40,5 +40,6 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.press({ key: 't-1' })
     expect(sent.length).toBe(1)
     expect(sent[0]).toContain('#1')
+    expect(sent[0]).toContain('NO ejecutes')
   })
 }

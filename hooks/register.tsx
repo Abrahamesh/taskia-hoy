@@ -164,11 +164,14 @@ function toggle($: any, group: string) {
 
 function startPrompt(t: TaskiaTask): string {
   return (
-    `Vamos a trabajar la tarea de Taskia #${t.ref} "${t.name}" (workspace ${t.workspace}).\n` +
+    `Quiero trabajar la tarea de Taskia #${t.ref} "${t.name}" (workspace ${t.workspace}).\n` +
+    `NO ejecutes nada todavía: solo lee y propón.\n` +
     `1) Léela completa con agent_get_task, sus comentarios (agent_list_task_comments) y subtareas si tiene.\n` +
-    `2) Dime en 2-3 líneas qué entiendes y el plan.\n` +
-    `3) Si la puedes ejecutar con las herramientas conectadas, arráncala; si no, prepárame lo que necesito.\n` +
-    `4) Al terminar o pausar, deja un comentario de avance en la tarea con agent_add_task_comment.`
+    `2) Dime en 2-3 líneas qué entiendes que hay que hacer.\n` +
+    `3) Propón el plan en pasos cortos, marcando cuáles puedes hacer tú con las herramientas conectadas y cuáles me tocan a mí.\n` +
+    `4) Si algo no está claro, hazme las preguntas concretas (máximo 3) en vez de asumir.\n` +
+    `5) Cierra con: "¿Lo ejecuto así, ajusto algo o lo dejamos?" y espera mi respuesta.\n` +
+    `Solo cuando yo apruebe, ejecútalo; al terminar o pausar, deja un comentario de avance en la tarea con agent_add_task_comment.`
   )
 }
 
