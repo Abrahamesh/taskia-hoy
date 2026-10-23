@@ -4,9 +4,10 @@ Mod de Claude Code: panel lateral con tus tareas de Taskia de hoy, clasificadas
 (urgente hoy, vencida reciente, en curso, vieja) con una recomendación por tarea.
 Clic en una tarea y Claude la empieza.
 
-Requiere el conector de Taskia llamado exactamente `MCP_TASKIA` conectado en la
-sesión. El panel solo lee de ese: cualquier otro conector con las mismas
-herramientas (por ejemplo `MCP_WEB_TASKIA_DEV`) se ignora. En la app de
+Requiere el conector de Taskia conectado en la sesión, llamado `Taskia` o
+`MCP_TASKIA` (sin distinguir mayúsculas). El panel solo lee de ese: cualquier
+otro conector con las mismas herramientas (por ejemplo `MCP_WEB_TASKIA_DEV`) se
+ignora. En la app de
 escritorio el nombre se busca en la lista de conectores de la sesión.
 
 ## Instalación
@@ -69,7 +70,7 @@ tu conexión; lo ves en el error del panel.
 ```
 
 La primera solo lee tus tareas del día; la segunda solo lee la lista de
-conectores de la sesión (en la app de escritorio, para encontrar `MCP_TASKIA`).
+conectores de la sesión (en la app de escritorio, para encontrar el de Taskia).
 
 ## Uso
 

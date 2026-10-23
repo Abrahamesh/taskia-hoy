@@ -110,3 +110,40 @@ test('con perfil: lo usa tal cual', { options: { perfil: 'coordinador de logíst
   expect(prompt).toContain('esta persona: coordinador de logística de una empresa de transporte')
   expect(prompt).not.toContain('dedúcelo')
 })
+
+// En otras cuentas el conector se llama "Taskia" a secas.
+test('desktop: acepta el conector llamado Taskia', async ($, on) => {
+  const called: string[] = []
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
+  on('tool.list', async () => ({ value: tools }) as any)
+  on('mcp.call', async (_$: any, e: any) => {
+    called.push(e.server)
+    if (e.server === 'ccd_connectors') {
+      return reply({ servers: [
+        { name: 'MCP_WEB_TASKIA_DEV', id: DEV, kind: 'connector', status: 'connected' },
+        { name: 'Taskia', id: PROD, kind: 'connector', status: 'connected' },
+      ] })
+    }
+    return reply({ items })
+  })
+  on('model.complete', async () => ({ value: { isAnswered: false } }) as any)
+
+  await $.command.run({ command: 'taskia', args: '' } as any)
+  for (let i = 0; i < 50 && !called.includes(PROD); i++) await sleep(10)
+  expect(called).toContain(PROD)
+  expect(called).not.toContain(DEV)
+})
+
+test('terminal: acepta el conector claude.ai Taskia', async ($, on) => {
+  const called: string[] = []
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
+  on('tool.list', async () => ({
+    value: ['claude_ai_MCP_WEB_TASKIA_DEV', 'claude_ai_Taskia'].map(s => ({ name: `mcp__${s}__agent_what_to_do_today`, description: '', mcp: true })),
+  }) as any)
+  on('mcp.call', async (_$: any, e: any) => { called.push(e.server); return reply({ items }) })
+  on('model.complete', async () => ({ value: { isAnswered: false } }) as any)
+
+  await $.command.run({ command: 'taskia', args: '' } as any)
+  for (let i = 0; i < 50 && called.length === 0; i++) await sleep(10)
+  expect(called).toEqual(['claude_ai_Taskia'])
+})

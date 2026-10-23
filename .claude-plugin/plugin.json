@@ -1,6 +1,6 @@
 {
   "name": "taskia-hoy",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Panel lateral con tus tareas de Taskia de hoy, clasificadas con recomendación; clic para que Claude la empiece",
   "types": "./types/index.d.ts",
   "userConfig": {
