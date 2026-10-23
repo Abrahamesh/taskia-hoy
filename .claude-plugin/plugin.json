@@ -1,1 +1,14 @@
-{ "name": "taskia-hoy", "version": "0.2.2", "description": "Panel lateral con tus tareas de Taskia de hoy, clasificadas con recomendación; clic para que Claude la empiece", "types": "./types/index.d.ts" }
+{
+  "name": "taskia-hoy",
+  "version": "0.3.0",
+  "description": "Panel lateral con tus tareas de Taskia de hoy, clasificadas con recomendación; clic para que Claude la empiece",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "perfil": {
+      "type": "string",
+      "title": "Perfil",
+      "description": "Quién usa el panel y a qué se dedica, para clasificar mejor las tareas (ej.: \"coordinador de flota de Hidrocaven\"). Vacío: se deduce de las tareas.",
+      "default": ""
+    }
+  }
+}

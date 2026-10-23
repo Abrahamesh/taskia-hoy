@@ -15,6 +15,9 @@ const connectors = {
   servers: [
     { name: 'MCP_TASKIA', id: PROD, kind: 'connector', status: 'connected' },
     { name: 'MCP_WEB_TASKIA_DEV', id: DEV, kind: 'connector', status: 'connected' },
+    { name: 'Microsoft 365', id: 'm365', kind: 'connector', status: 'connected' },
+    { name: 'plugin:pdf-viewer:pdf', kind: 'plugin', status: 'connected' },
+    { name: 'Gmail', id: 'gmail', kind: 'connector', status: 'needs_auth' },
   ],
 }
 const reply = (data: unknown) => ({ value: { content: [{ type: 'text', text: JSON.stringify(data) }], isError: false } }) as any
@@ -78,4 +81,32 @@ test('terminal: usa el conector claude.ai MCP_TASKIA por su nombre', async ($, o
   await $.command.run({ command: 'taskia', args: '' } as any)
   for (let i = 0; i < 50 && called.length === 0; i++) await sleep(10)
   expect(called).toEqual(['claude_ai_MCP_TASKIA'])
+})
+
+// El prompt de clasificación no supone un rol: usa la opción "perfil" o lo deduce,
+// y la marca ▶ depende de los conectores conectados en esa sesión.
+async function classifyPrompt($: any, on: any): Promise<string> {
+  const prompts: string[] = []
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
+  on('tool.list', async () => ({ value: tools }) as any)
+  on('mcp.call', async (_$: any, e: any) => reply(e.server === 'ccd_connectors' ? connectors : { items }))
+  on('model.complete', async (_$: any, e: any) => { prompts.push(e.prompt); return { value: { isAnswered: false } } as any })
+  await $.command.run({ command: 'taskia', args: '' } as any)
+  for (let i = 0; i < 50 && prompts.length === 0; i++) await sleep(10)
+  return prompts[0] ?? ''
+}
+
+test('sin perfil: deduce el rol y lista solo los conectores conectados', async ($, on) => {
+  const prompt = await classifyPrompt($, on)
+  expect(prompt).toContain('dedúcelo')
+  expect(prompt).not.toContain('consultor de automatización')
+  expect(prompt).toContain('Microsoft 365, pdf')
+  expect(prompt).not.toContain('Gmail')
+  expect(prompt).not.toContain('TASKIA')
+})
+
+test('con perfil: lo usa tal cual', { options: { perfil: 'coordinador de flota de Hidrocaven' } }, async ($, on) => {
+  const prompt = await classifyPrompt($, on)
+  expect(prompt).toContain('esta persona: coordinador de flota de Hidrocaven')
+  expect(prompt).not.toContain('dedúcelo')
 })

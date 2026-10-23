@@ -8,6 +8,8 @@ const TOOL = 'agent_what_to_do_today'
 const CONNECTOR = 'MCP_TASKIA'
 const CONNECTORS_SERVER = 'ccd_connectors'
 const CONNECTORS_TOOL = 'session_connectors_status'
+// Quién usa el panel, de la opción "perfil" del mod; se fija al cargar el módulo.
+let profile = ''
 const MAX = 30
 const GROUPS = ['Urgente hoy', 'Vencida reciente', 'En curso', 'Vieja / revisar si sigue']
 // Nombre corto de cada grupo para la fila de conteos del resumen.
@@ -58,9 +60,11 @@ function fallbackGroup(t: Raw): string {
   return ageDays > 60 ? 'Vieja / revisar si sigue' : 'Vencida reciente'
 }
 
+// Lo conectado en la sesión: el servidor de MCP_TASKIA y los nombres de los demás
+// conectores, que dicen qué tareas puede avanzar el asistente por su cuenta.
 // El panel solo lee del conector que se llama exactamente MCP_TASKIA. Otros
 // conectores con las mismas herramientas (MCP_WEB_TASKIA_DEV, TaskiaDev) se ignoran.
-async function taskiaServer($: any): Promise<string | undefined> {
+async function sessionConnectors($: any): Promise<{ server?: string; names: string[] }> {
   const servers = new Set<string>(
     (await $.tool.list())
       .map((t: any) => String(t.name))
@@ -68,33 +72,45 @@ async function taskiaServer($: any): Promise<string | undefined> {
       .map((n: string) => n.slice('mcp__'.length, n.indexOf('__', 'mcp__'.length))),
   )
   // En la terminal el servidor lleva el nombre del conector (claude_ai_MCP_TASKIA).
-  for (const s of servers) if (s === CONNECTOR || s === `claude_ai_${CONNECTOR}`) return s
+  if (!servers.has(CONNECTORS_SERVER)) {
+    const server = [...servers].find(s => s === CONNECTOR || s === `claude_ai_${CONNECTOR}`)
+    return { server, names: usefulNames([...servers].map(s => s.replace(/^claude_ai_/, '').replace(/_/g, ' '))) }
+  }
   // En la app de escritorio el servidor es un ID: el nombre se busca en la lista de conectores.
-  if (!servers.has(CONNECTORS_SERVER)) return undefined
   const res = await $.mcp.call(CONNECTORS_SERVER, CONNECTORS_TOOL, {})
   if (res.isError) throw new Error('no pude leer la lista de conectores de la app')
   const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
-  const row = (JSON.parse(text).servers ?? []).find((r: any) => r.name === CONNECTOR && r.status === 'connected')
-  return row?.id && servers.has(row.id) ? String(row.id) : undefined
+  const rows: any[] = (JSON.parse(text).servers ?? []).filter((r: any) => r.status === 'connected')
+  const id = rows.find(r => r.name === CONNECTOR)?.id
+  return {
+    server: id && servers.has(id) ? String(id) : undefined,
+    names: usefulNames(rows.map(r => String(r.name).split(':').pop() ?? '')),
+  }
+}
+
+// Sin Taskia (ya está en el panel) ni las herramientas internas de la app.
+function usefulNames(names: string[]): string[] {
+  return [...new Set(names.map(n => n.trim()).filter(n => n !== '' && !/taskia|^ccd /i.test(n)))]
 }
 
 // Al iniciar la sesión los MCP pueden tardar en conectar: se espera hasta ~30 s.
-async function fetchTasks($: any): Promise<Raw[]> {
-  let server: string | undefined
-  for (let i = 0; i < 10 && !server; i++) {
-    server = await taskiaServer($)
-    if (!server) await $.clock.sleep(3000)
+async function fetchTasks($: any): Promise<{ raw: Raw[]; tools: string[] }> {
+  let found: { server?: string; names: string[] } = { names: [] }
+  for (let i = 0; i < 10 && !found.server; i++) {
+    found = await sessionConnectors($)
+    if (!found.server) await $.clock.sleep(3000)
   }
-  if (!server) throw new Error(`el conector ${CONNECTOR} no está conectado en esta sesión`)
-  const res = await $.mcp.call(server, TOOL, { limit: 50, include_overdue: true })
+  if (!found.server) throw new Error(`el conector ${CONNECTOR} no está conectado en esta sesión`)
+  const res = await $.mcp.call(found.server, TOOL, { limit: 50, include_overdue: true })
   if (res.isError) throw new Error(`${CONNECTOR} respondió con error`)
   const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
-  return (JSON.parse(text).items ?? []) as Raw[]
+  return { raw: (JSON.parse(text).items ?? []) as Raw[], tools: found.names }
 }
 
 // Lo que sale del modelo: el resumen del día y la clasificación de cada tarea.
+// El perfil viene de la opción "perfil"; vacía, el modelo lo deduce de las tareas.
 // Si el modelo no responde o responde mal, quedan los grupos por fecha y sin resumen.
-async function classify($: any, raw: Raw[]): Promise<{ list: TaskiaTask[]; brief: string }> {
+async function classify($: any, raw: Raw[], tools: string[]): Promise<{ list: TaskiaTask[]; brief: string }> {
   const base: TaskiaTask[] = raw.slice(0, MAX).map(t => ({
     ref: String(t.task_ref),
     name: t.name,
@@ -109,14 +125,18 @@ async function classify($: any, raw: Raw[]): Promise<{ list: TaskiaTask[]; brief
   if (base.length === 0) return { list: base, brief: '' }
 
   const prompt =
-    `Hoy es ${today()}. Clasifica estas tareas de Taskia de un consultor de automatización (n8n, Power BI, Odoo, M365, agentes IA).\n` +
+    `Hoy es ${today()}. Clasifica estas tareas de Taskia de ` +
+    (profile !== ''
+      ? `esta persona: ${profile}.\n`
+      : `una persona cuyo rol no conoces: dedúcelo de los workspaces y los nombres de las tareas.\n`) +
     `Grupos válidos: ${GROUPS.join(' | ')}.\n` +
     `Devuelve SOLO un objeto JSON, sin texto extra, con esta forma:\n` +
     `{"brief": "...", "tasks": [{"ref", "group", "summary", "advice", "canDo"}]}\n` +
     `- brief: máx 25 palabras, en tono directo, qué es lo más importante hoy y por dónde empezar.\n` +
     `- summary: máx 12 palabras, qué es la tarea.\n` +
     `- advice: máx 12 palabras, qué hacer ya.\n` +
-    `- canDo: true si un asistente con acceso a n8n, Power BI, Odoo, documentos y correo puede avanzarla solo.\n\n` +
+    `- canDo: true solo si un asistente que lee y escribe archivos y tiene estos conectores puede avanzarla sin la persona: ` +
+    `${tools.length > 0 ? tools.join(', ') : 'ninguno'}. Si la tarea pide algo fuera de eso (reuniones, visitas, llamadas, sistemas no conectados), false.\n\n` +
     JSON.stringify(raw.slice(0, MAX).map(t => ({
       ref: t.task_ref, name: t.name, ws: t.workspace_name, due: day(t.estimatedduedate),
       status: t.status, pct: t.accomplishment, prio: t.priority, urg: t.urgency,
@@ -155,8 +175,8 @@ async function classify($: any, raw: Raw[]): Promise<{ list: TaskiaTask[]; brief
 async function refresh($: any) {
   await update($, load, () => 'loading' as TaskiaLoad)
   try {
-    const raw = await fetchTasks($)
-    const { list, brief: text } = await classify($, raw)
+    const { raw, tools } = await fetchTasks($)
+    const { list, brief: text } = await classify($, raw, tools)
     await update($, tasks, () => list)
     await update($, brief, () => text)
     await update($, updatedAt, () => new Date().toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' }))
@@ -184,7 +204,9 @@ function startPrompt(t: TaskiaTask): string {
   )
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  profile = String(options.perfil ?? '').trim()
+
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'taskia', description: 'Abre el panel de tareas de Taskia y lo recarga' })
     void $.ui.open({ id: PANE, title: 'Taskia · Hoy' })
