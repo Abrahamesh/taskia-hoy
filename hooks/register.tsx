@@ -5,7 +5,8 @@ import type { TaskiaLoad, TaskiaTask } from '../types'
 
 const PANE = 'taskia-hoy'
 const TOOL = 'agent_what_to_do_today'
-const CONNECTOR = 'MCP_TASKIA'
+// Nombres que puede tener el conector de Taskia en claude.ai, por preferencia.
+const CONNECTORS = ['MCP_TASKIA', 'Taskia']
 const CONNECTORS_SERVER = 'ccd_connectors'
 const CONNECTORS_TOOL = 'session_connectors_status'
 // Quién usa el panel, de la opción "perfil" del mod; se fija al cargar el módulo.
@@ -60,10 +61,18 @@ function fallbackGroup(t: Raw): string {
   return ageDays > 60 ? 'Vieja / revisar si sigue' : 'Vencida reciente'
 }
 
-// Lo conectado en la sesión: el servidor de MCP_TASKIA y los nombres de los demás
+// Posición del nombre en CONNECTORS (sin distinguir mayúsculas), o -1 si no es de Taskia.
+const rank = (name: string) => CONNECTORS.findIndex(c => c.toLowerCase() === name.toLowerCase())
+
+// El de mejor posición entre los conectores con nombre de Taskia.
+function pick<T>(items: T[], name: (t: T) => string): T | undefined {
+  return items.filter(t => rank(name(t)) >= 0).sort((a, b) => rank(name(a)) - rank(name(b)))[0]
+}
+
+// Lo conectado en la sesión: el servidor de Taskia y los nombres de los demás
 // conectores, que dicen qué tareas puede avanzar el asistente por su cuenta.
-// El panel solo lee del conector que se llama exactamente MCP_TASKIA. Otros
-// conectores con las mismas herramientas (MCP_WEB_TASKIA_DEV, TaskiaDev) se ignoran.
+// El panel solo lee de un conector llamado exactamente como uno de CONNECTORS.
+// Otros con las mismas herramientas (MCP_WEB_TASKIA_DEV, TaskiaDev) se ignoran.
 async function sessionConnectors($: any): Promise<{ server?: string; names: string[] }> {
   const servers = new Set<string>(
     (await $.tool.list())
@@ -71,9 +80,9 @@ async function sessionConnectors($: any): Promise<{ server?: string; names: stri
       .filter((n: string) => n.startsWith('mcp__'))
       .map((n: string) => n.slice('mcp__'.length, n.indexOf('__', 'mcp__'.length))),
   )
-  // En la terminal el servidor lleva el nombre del conector (claude_ai_MCP_TASKIA).
+  // En la terminal el servidor lleva el nombre del conector (claude_ai_Taskia).
   if (!servers.has(CONNECTORS_SERVER)) {
-    const server = [...servers].find(s => s === CONNECTOR || s === `claude_ai_${CONNECTOR}`)
+    const server = pick([...servers], s => s.replace(/^claude_ai_/, ''))
     return { server, names: usefulNames([...servers].map(s => s.replace(/^claude_ai_/, '').replace(/_/g, ' '))) }
   }
   // En la app de escritorio el servidor es un ID: el nombre se busca en la lista de conectores.
@@ -81,7 +90,7 @@ async function sessionConnectors($: any): Promise<{ server?: string; names: stri
   if (res.isError) throw new Error('no pude leer la lista de conectores de la app')
   const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
   const rows: any[] = (JSON.parse(text).servers ?? []).filter((r: any) => r.status === 'connected')
-  const id = rows.find(r => r.name === CONNECTOR)?.id
+  const id = pick(rows.filter(r => servers.has(r.id)), r => String(r.name))?.id
   return {
     server: id && servers.has(id) ? String(id) : undefined,
     names: usefulNames(rows.map(r => String(r.name).split(':').pop() ?? '')),
@@ -100,9 +109,9 @@ async function fetchTasks($: any): Promise<{ raw: Raw[]; tools: string[] }> {
     found = await sessionConnectors($)
     if (!found.server) await $.clock.sleep(3000)
   }
-  if (!found.server) throw new Error(`el conector ${CONNECTOR} no está conectado en esta sesión`)
+  if (!found.server) throw new Error(`no hay un conector llamado ${CONNECTORS.join(' o ')} conectado en esta sesión`)
   const res = await $.mcp.call(found.server, TOOL, { limit: 50, include_overdue: true })
-  if (res.isError) throw new Error(`${CONNECTOR} respondió con error`)
+  if (res.isError) throw new Error('el conector de Taskia respondió con error')
   const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
   return { raw: (JSON.parse(text).items ?? []) as Raw[], tools: found.names }
 }
