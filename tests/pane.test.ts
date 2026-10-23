@@ -1,15 +1,27 @@
 import { expect, test } from 'claude-code/testing'
 
-const items = [
-  { task_ref: '1', name: 'Flujo n8n cliente', workspace_name: 'Cliente A', estimatedduedate: '2026-10-16 00:00:00+00', status: 'En curso' },
-  { task_ref: '2', name: 'Proyecto viejo', workspace_name: 'Interno', estimatedduedate: '2024-09-05 00:00:00+00', status: 'Ideas' },
-]
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
+// Mis tareas (mine: true). Pendientes: 1, 2 y 8. Fuera: 5 tiene hijas, 6 va por 95%, 7 está cancelada.
+const mine = [
+  { task_ref: '1', name: 'Rediseño del flujo de compras con un nombre bastante largo para ver que no se corta', workspace_name: 'Cliente A', status: 'Por hacer', has_child_tasks: false },
+  { task_ref: '2', name: 'Ordenar gastos', workspace_name: 'Interno', status: 'En progreso', accomplishment: 50, has_child_tasks: false },
+  { task_ref: '5', name: '3. Propuesta', workspace_name: 'Cliente A', status: 'Por hacer', accomplishment: 0, has_child_tasks: true },
+  { task_ref: '6', name: 'Casi lista', workspace_name: 'Cliente A', status: 'En progreso', accomplishment: 95, has_child_tasks: false },
+  { task_ref: '7', name: 'Ya no va', workspace_name: 'Cliente A', status: 'Cancelada', has_child_tasks: false },
+  { task_ref: '8', name: 'Revisar inventario', workspace_name: 'Cliente A', status: 'En progreso', accomplishment: 30, has_child_tasks: false },
+]
+// Todo el workspace (mine: false): la fase 4 es de otra persona y de ella cuelga la propuesta.
+const workspace: Record<string, any[]> = {
+  'Cliente A': [...mine.filter(t => t.workspace_name === 'Cliente A'), { task_ref: '4', name: 'Fase 2', workspace_name: 'Cliente A', has_child_tasks: true }],
+  Interno: mine.filter(t => t.workspace_name === 'Interno'),
+}
+const children: Record<string, any[]> = { '4': [{ task_ref: '5' }, { task_ref: '8' }], '5': [{ task_ref: '1' }, { task_ref: '6' }] }
 
 // Como en la app de escritorio: los conectores son IDs y el de dev tiene las mismas herramientas.
 const PROD = '85455823-b86c-44ae-956c-a7ad56bed3e8'
 const DEV = 'cb43329c-1bbb-4f85-a0d9-8e0b352f5cf6'
-const tools = [DEV, PROD].map(s => ({ name: `mcp__${s}__agent_what_to_do_today`, description: '', mcp: true }))
+const tools = [DEV, PROD].map(s => ({ name: `mcp__${s}__agent_search_tasks`, description: '', mcp: true }))
   .concat([{ name: 'mcp__ccd_connectors__session_connectors_status', description: '', mcp: true }])
 const connectors = {
   servers: [
@@ -22,26 +34,42 @@ const connectors = {
 }
 const reply = (data: unknown) => ({ value: { content: [{ type: 'text', text: JSON.stringify(data) }], isError: false } }) as any
 
+// Un Taskia de mentira: búsqueda propia, búsqueda por workspace e hijas.
+function taskia(e: any) {
+  if (e.tool === 'agent_search_tasks') {
+    const items = e.args.mine ? mine : workspace[e.args.workspace] ?? []
+    return reply({ items, pagination: { has_more: false } })
+  }
+  if (e.tool === 'agent_list_task_children') return reply({ children: children[e.args.task_ref] ?? [] })
+  return reply({})
+}
+
+function mockTaskia(on: any, called: string[], list = tools, conns: unknown = connectors) {
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
+  on('tool.list', async () => ({ value: list }) as any)
+  on('mcp.call', async (_$: any, e: any) => {
+    called.push(e.server)
+    return e.server === 'ccd_connectors' ? reply(conns) : taskia(e)
+  })
+}
+
+async function waitFor<T>(fn: () => Promise<T | undefined>): Promise<T | undefined> {
+  let v: T | undefined
+  for (let i = 0; i < 80 && !v; i++) { await sleep(10); v = await fn() }
+  return v
+}
+
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`${surface}: carga, clasifica y al pulsar una tarea la arranca`, async ($, on) => {
+  test(`${surface}: hojas pendientes por workspace, con su camino, y al pulsar arranca`, async ($, on) => {
     const sent: string[] = []
     const called: string[] = []
-    on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
-    on('tool.list', async () => ({ value: tools }) as any)
-    on('mcp.call', async (_$: any, e: any) => {
-      called.push(e.server)
-      if (e.server === 'ccd_connectors') return reply(connectors)
-      return reply({ items: e.server === PROD ? items : [] })
-    })
+    mockTaskia(on, called)
     on('model.complete', async () => ({
       value: {
         isAnswered: true,
         text: JSON.stringify({
-          brief: 'Empieza por el flujo de n8n que vence hoy.',
-          tasks: [
-            { ref: '1', group: 'Urgente hoy', summary: 'Ajustar flujo', advice: 'Revisar ejecución fallida', canDo: true },
-            { ref: '2', group: 'Vieja / revisar si sigue', summary: 'Proyecto viejo', advice: 'Cerrar o archivar', canDo: false },
-          ],
+          brief: 'Empieza por revisar el inventario.',
+          tasks: [{ ref: '1', advice: 'Hablar con compras', canDo: true }],
         }),
         usage: { input_tokens: 1, output_tokens: 1 },
       },
@@ -50,100 +78,101 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await $.command.run({ command: 'taskia', args: '' } as any)
     const ui = await $.ui.mount({ plugin: 'taskia-hoy', surface, component: 'Pane', requestId: 'taskia-hoy', props: { title: 'Taskia · Hoy' } as any })
-    // "Urgente hoy" arranca plegado: la tarea no se ve hasta abrir el grupo.
-    let header
-    for (let i = 0; i < 50 && !header; i++) { await sleep(10); await ui.resize?.({ columns: 60, rows: 40 } as any).catch(() => {}); header = await ui.find({ key: 'g-Urgente hoy' }) }
-    expect(header).toBeDefined()
+    await ui.resize?.({ columns: 60, rows: 60 } as any).catch(() => {})
+
+    // "Cliente A" tiene más tareas: va primero y abierto; "Interno" cerrado.
+    expect(await waitFor(() => ui.find({ key: 't-1' }))).toBeDefined()
+    expect(await ui.find({ key: 'g-Cliente A' })).toBeDefined()
+    expect(await ui.find({ key: 'g-Interno' })).toBeDefined()
+    expect(await ui.find({ key: 't-2' })).toBeUndefined()
+    // Fuera: la que tiene hijas, la de 95% y la cancelada.
+    for (const ref of ['5', '6', '7']) expect(await ui.find({ key: `t-${ref}` })).toBeUndefined()
     // Solo se leyó del conector MCP_TASKIA, nunca del de dev.
     expect(called).toContain(PROD)
     expect(called).not.toContain(DEV)
-    expect(await ui.find({ key: 't-1' })).toBeUndefined()
-    await ui.press({ key: 'g-Urgente hoy' })
-    let btn
-    for (let i = 0; i < 50 && !btn; i++) { await sleep(10); btn = await ui.find({ key: 't-1' }) }
-    expect(btn).toBeDefined()
+
+    await ui.press({ key: 'g-Interno' })
+    expect(await waitFor(() => ui.find({ key: 't-2' }))).toBeDefined()
+
     await ui.press({ key: 't-1' })
     expect(sent.length).toBe(1)
     expect(sent[0]).toContain('#1')
+    expect(sent[0]).toContain('dentro de Fase 2 › 3. Propuesta')
     expect(sent[0]).toContain('NO ejecutes')
   })
 }
 
-test('terminal: usa el conector claude.ai MCP_TASKIA por su nombre', async ($, on) => {
-  const called: string[] = []
-  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
-  on('tool.list', async () => ({
-    value: ['claude_ai_MCP_WEB_TASKIA_DEV', 'claude_ai_MCP_TASKIA'].map(s => ({ name: `mcp__${s}__agent_what_to_do_today`, description: '', mcp: true })),
-  }) as any)
-  on('mcp.call', async (_$: any, e: any) => { called.push(e.server); return reply({ items }) })
-  on('model.complete', async () => ({ value: { isAnswered: false } }) as any)
-
-  await $.command.run({ command: 'taskia', args: '' } as any)
-  for (let i = 0; i < 50 && called.length === 0; i++) await sleep(10)
-  expect(called).toEqual(['claude_ai_MCP_TASKIA'])
-})
-
-// El prompt de clasificación no supone un rol: usa la opción "perfil" o lo deduce,
-// y la marca ▶ depende de los conectores conectados en esa sesión.
-async function classifyPrompt($: any, on: any): Promise<string> {
+// El camino y el orden que recibe el modelo, sin depender de cómo se dibuja.
+async function classifyInput($: any, on: any): Promise<{ prompt: string; tasks: any[] }> {
   const prompts: string[] = []
-  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
-  on('tool.list', async () => ({ value: tools }) as any)
-  on('mcp.call', async (_$: any, e: any) => reply(e.server === 'ccd_connectors' ? connectors : { items }))
+  mockTaskia(on, [])
   on('model.complete', async (_$: any, e: any) => { prompts.push(e.prompt); return { value: { isAnswered: false } } as any })
   await $.command.run({ command: 'taskia', args: '' } as any)
-  for (let i = 0; i < 50 && prompts.length === 0; i++) await sleep(10)
-  return prompts[0] ?? ''
+  for (let i = 0; i < 80 && prompts.length === 0; i++) await sleep(10)
+  const prompt = prompts[0] ?? ''
+  return { prompt, tasks: JSON.parse(prompt.slice(prompt.lastIndexOf('\n') + 1) || '[]') }
 }
 
-test('sin perfil: deduce el rol y lista solo los conectores conectados', async ($, on) => {
-  const prompt = await classifyPrompt($, on)
+test('arma el camino desde los padres, aunque no sean míos, y ordena por workspace y estado', async ($, on) => {
+  const { tasks } = await classifyInput($, on)
+  expect(tasks.map((t: any) => t.ref)).toEqual(['8', '1', '2'])
+  expect(tasks.find((t: any) => t.ref === '1').path).toBe('Fase 2 › 3. Propuesta')
+  expect(tasks.find((t: any) => t.ref === '8').path).toBe('Fase 2')
+  expect(tasks.find((t: any) => t.ref === '2').path).toBe('')
+})
+
+test('sin perfil: deduce el rol, no usa fechas y lista solo los conectores conectados', async ($, on) => {
+  const { prompt } = await classifyInput($, on)
   expect(prompt).toContain('dedúcelo')
-  expect(prompt).not.toContain('consultor de automatización')
+  expect(prompt).toContain('casi no usa fechas')
   expect(prompt).toContain('Microsoft 365, pdf')
   expect(prompt).not.toContain('Gmail')
   expect(prompt).not.toContain('TASKIA')
 })
 
 test('con perfil: lo usa tal cual', { options: { perfil: 'coordinador de logística de una empresa de transporte' } }, async ($, on) => {
-  const prompt = await classifyPrompt($, on)
+  const { prompt } = await classifyInput($, on)
   expect(prompt).toContain('esta persona: coordinador de logística de una empresa de transporte')
   expect(prompt).not.toContain('dedúcelo')
 })
 
-// En otras cuentas el conector se llama "Taskia" a secas.
 test('desktop: acepta el conector llamado Taskia', async ($, on) => {
   const called: string[] = []
-  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
-  on('tool.list', async () => ({ value: tools }) as any)
-  on('mcp.call', async (_$: any, e: any) => {
-    called.push(e.server)
-    if (e.server === 'ccd_connectors') {
-      return reply({ servers: [
-        { name: 'MCP_WEB_TASKIA_DEV', id: DEV, kind: 'connector', status: 'connected' },
-        { name: 'Taskia', id: PROD, kind: 'connector', status: 'connected' },
-      ] })
-    }
-    return reply({ items })
-  })
+  mockTaskia(on, called, tools, { servers: [
+    { name: 'MCP_WEB_TASKIA_DEV', id: DEV, kind: 'connector', status: 'connected' },
+    { name: 'Taskia', id: PROD, kind: 'connector', status: 'connected' },
+  ] })
   on('model.complete', async () => ({ value: { isAnswered: false } }) as any)
-
   await $.command.run({ command: 'taskia', args: '' } as any)
   for (let i = 0; i < 50 && !called.includes(PROD); i++) await sleep(10)
   expect(called).toContain(PROD)
   expect(called).not.toContain(DEV)
 })
 
-test('terminal: acepta el conector claude.ai Taskia', async ($, on) => {
-  const called: string[] = []
-  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
-  on('tool.list', async () => ({
-    value: ['claude_ai_MCP_WEB_TASKIA_DEV', 'claude_ai_Taskia'].map(s => ({ name: `mcp__${s}__agent_what_to_do_today`, description: '', mcp: true })),
-  }) as any)
-  on('mcp.call', async (_$: any, e: any) => { called.push(e.server); return reply({ items }) })
-  on('model.complete', async () => ({ value: { isAnswered: false } }) as any)
+for (const name of ['MCP_TASKIA', 'Taskia']) {
+  test(`terminal: acepta el conector claude.ai ${name}`, async ($, on) => {
+    const called: string[] = []
+    const list = ['claude_ai_MCP_WEB_TASKIA_DEV', `claude_ai_${name}`].map(s => ({ name: `mcp__${s}__agent_search_tasks`, description: '', mcp: true }))
+    mockTaskia(on, called, list)
+    on('model.complete', async () => ({ value: { isAnswered: false } }) as any)
+    await $.command.run({ command: 'taskia', args: '' } as any)
+    for (let i = 0; i < 50 && called.length === 0; i++) await sleep(10)
+    expect(called.length).toBeGreaterThan(0)
+    expect([...new Set(called)]).toEqual([`claude_ai_${name}`])
+  })
+}
 
+// Modo auto sin permisos: el error explica en español qué agregar, sin datos viejos.
+test('modo auto: si bloquea la lectura, dice qué permisos agregar', async ($, on) => {
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as any)
+  on('tool.list', async () => ({ value: tools }) as any)
+  on('mcp.call', async (_$: any, e: any) => {
+    if (e.server === 'ccd_connectors') return reply(connectors)
+    return { deny: 'The server-side auto mode classifier gave no verdict' } as any
+  })
   await $.command.run({ command: 'taskia', args: '' } as any)
-  for (let i = 0; i < 50 && called.length === 0; i++) await sleep(10)
-  expect(called).toEqual(['claude_ai_Taskia'])
+  const ui = await $.ui.mount({ plugin: 'taskia-hoy', surface: 'desktop', component: 'Pane', requestId: 'taskia-hoy', props: { title: 'Taskia · Hoy' } as any })
+  const err = await waitFor(() => ui.find({ text: /modo auto bloqueó/ }))
+  expect(err?.text).toContain('agent_search_tasks y agent_list_task_children')
+  expect(await ui.find({ text: /refused/ })).toBeUndefined()
 })

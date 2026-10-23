@@ -1,14 +1,21 @@
 # taskia-hoy
 
-Mod de Claude Code: panel lateral con tus tareas de Taskia de hoy, clasificadas
-(urgente hoy, vencida reciente, en curso, vieja) con una recomendación por tarea.
-Clic en una tarea y Claude la empieza.
+Mod de Claude Code: panel lateral con tus tareas pendientes de Taskia, agrupadas
+por workspace, con una recomendación por tarea. Clic en **Empezar** o
+**Preparar** y Claude la arranca.
+
+Qué tareas muestra (no depende de fechas):
+
+- Donde eres **responsable**.
+- Solo **hojas** del árbol (las que no tienen subtareas: ahí están las acciones).
+  Debajo de cada una se ve de qué tarea padre viene (`↳ Fase 2 › Propuesta`).
+- Con **menos de 90%** de avance y **no canceladas**.
 
 Requiere el conector de Taskia conectado en la sesión, llamado `Taskia` o
 `MCP_TASKIA` (sin distinguir mayúsculas). El panel solo lee de ese: cualquier
 otro conector con las mismas herramientas (por ejemplo `MCP_WEB_TASKIA_DEV`) se
-ignora. En la app de
-escritorio el nombre se busca en la lista de conectores de la sesión.
+ignora. En la app de escritorio el nombre se busca en la lista de conectores de
+la sesión.
 
 ## Instalación
 
@@ -55,25 +62,24 @@ dejarlo vacío.
 
 ## Modo auto
 
-En modo auto, el revisor de permisos bloquea las llamadas que hace el panel por su
-cuenta, porque no vienen de un mensaje tuyo. Para permitirlas, agrégalas a
-`permissions.allow` en `~/.claude/settings.json`. El ID del servidor cambia según
-tu conexión; lo ves en el error del panel.
+Solo para quien use **modo auto**. En ese modo Claude bloquea las llamadas que no
+salen de un mensaje tuyo, y el panel llama a Taskia por su cuenta. Hay que
+permitirle dos herramientas de solo lectura de tu conector de Taskia.
 
-```json
-"permissions": {
-  "allow": [
-    "mcp__<id-del-servidor>__agent_what_to_do_today",
-    "mcp__ccd_connectors__session_connectors_status"
-  ]
-}
+Lo más fácil: pega esto en el chat de Claude (pestaña Code) y abre una sesión nueva.
+
+```text
+Agrega a "permissions.allow" en mi archivo ~/.claude/settings.json las herramientas
+agent_search_tasks y agent_list_task_children de mi conector de Taskia (el que se
+llama Taskia o MCP_TASKIA, no el de dev). Usa el ID real de ese conector en esta
+sesión, con el formato mcp__<id>__<herramienta>. No borres nada de lo que ya esté.
 ```
 
-La primera solo lee tus tareas del día; la segunda solo lee la lista de
-conectores de la sesión (en la app de escritorio, para encontrar el de Taskia).
+Si se te olvida, el panel muestra este mismo aviso en lugar de las tareas.
 
 ## Uso
 
 - El panel **Taskia · Hoy** se abre solo al iniciar la sesión.
 - `/taskia` lo abre y lo recarga.
+- Un grupo por workspace; el de más tareas sale abierto, los demás se abren con un clic.
 - ▶ = Claude puede hacerla sola · ○ = solo preparar.

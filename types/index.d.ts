@@ -2,10 +2,9 @@ export type TaskiaTask = {
   ref: string
   name: string
   workspace: string
-  due: string
+  path: string
   status: string
-  group: string
-  summary: string
+  pct: number
   advice: string
   canDo: boolean
 }
@@ -20,7 +19,7 @@ declare module 'claude-code' {
       error: string
       updatedAt: string
       brief: string
-      open: string[]
+      flipped: string[]
     }
   }
 }
