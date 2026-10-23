@@ -1,1 +1,1 @@
-{ "name": "taskia-hoy", "version": "0.2.0", "description": "Panel lateral con tus tareas de Taskia de hoy, clasificadas con recomendación; clic para que Claude la empiece", "types": "./types/index.d.ts" }
+{ "name": "taskia-hoy", "version": "0.2.2", "description": "Panel lateral con tus tareas de Taskia de hoy, clasificadas con recomendación; clic para que Claude la empiece", "types": "./types/index.d.ts" }

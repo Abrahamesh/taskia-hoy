@@ -4,8 +4,10 @@ import type { Register } from 'claude-code'
 import type { TaskiaLoad, TaskiaTask } from '../types'
 
 const PANE = 'taskia-hoy'
-const SERVER = 'MCP_TASKIA'
 const TOOL = 'agent_what_to_do_today'
+const CONNECTOR = 'MCP_TASKIA'
+const CONNECTORS_SERVER = 'ccd_connectors'
+const CONNECTORS_TOOL = 'session_connectors_status'
 const MAX = 30
 const GROUPS = ['Urgente hoy', 'Vencida reciente', 'En curso', 'Vieja / revisar si sigue']
 // Nombre corto de cada grupo para la fila de conteos del resumen.
@@ -56,31 +58,38 @@ function fallbackGroup(t: Raw): string {
   return ageDays > 60 ? 'Vieja / revisar si sigue' : 'Vencida reciente'
 }
 
-// El nombre del servidor cambia según dónde esté conectado Taskia (en la app de
-// escritorio es un ID), así que se busca entre las herramientas de la sesión.
-async function taskiaServers($: any): Promise<string[]> {
-  const suffix = `__${TOOL}`
-  const found = (await $.tool.list())
-    .map((t: any) => String(t.name))
-    .filter((n: string) => n.startsWith('mcp__') && n.endsWith(suffix))
-    .map((n: string) => n.slice('mcp__'.length, -suffix.length))
-  return found.length > 0 ? found : [SERVER]
+// El panel solo lee del conector que se llama exactamente MCP_TASKIA. Otros
+// conectores con las mismas herramientas (MCP_WEB_TASKIA_DEV, TaskiaDev) se ignoran.
+async function taskiaServer($: any): Promise<string | undefined> {
+  const servers = new Set<string>(
+    (await $.tool.list())
+      .map((t: any) => String(t.name))
+      .filter((n: string) => n.startsWith('mcp__'))
+      .map((n: string) => n.slice('mcp__'.length, n.indexOf('__', 'mcp__'.length))),
+  )
+  // En la terminal el servidor lleva el nombre del conector (claude_ai_MCP_TASKIA).
+  for (const s of servers) if (s === CONNECTOR || s === `claude_ai_${CONNECTOR}`) return s
+  // En la app de escritorio el servidor es un ID: el nombre se busca en la lista de conectores.
+  if (!servers.has(CONNECTORS_SERVER)) return undefined
+  const res = await $.mcp.call(CONNECTORS_SERVER, CONNECTORS_TOOL, {})
+  if (res.isError) throw new Error('no pude leer la lista de conectores de la app')
+  const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
+  const row = (JSON.parse(text).servers ?? []).find((r: any) => r.name === CONNECTOR && r.status === 'connected')
+  return row?.id && servers.has(row.id) ? String(row.id) : undefined
 }
 
+// Al iniciar la sesión los MCP pueden tardar en conectar: se espera hasta ~30 s.
 async function fetchTasks($: any): Promise<Raw[]> {
-  let lastErr: unknown = new Error('Taskia no está conectado en esta sesión')
-  for (const server of await taskiaServers($)) {
-    try {
-      const res = await $.mcp.call(server, TOOL, { limit: 50, include_overdue: true })
-      if (res.isError) throw new Error('Taskia respondió con error')
-      const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
-      const data = JSON.parse(text)
-      return (data.items ?? []) as Raw[]
-    } catch (err) {
-      lastErr = err
-    }
+  let server: string | undefined
+  for (let i = 0; i < 10 && !server; i++) {
+    server = await taskiaServer($)
+    if (!server) await $.clock.sleep(3000)
   }
-  throw lastErr
+  if (!server) throw new Error(`el conector ${CONNECTOR} no está conectado en esta sesión`)
+  const res = await $.mcp.call(server, TOOL, { limit: 50, include_overdue: true })
+  if (res.isError) throw new Error(`${CONNECTOR} respondió con error`)
+  const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
+  return (JSON.parse(text).items ?? []) as Raw[]
 }
 
 // Lo que sale del modelo: el resumen del día y la clasificación de cada tarea.
