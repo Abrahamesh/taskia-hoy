@@ -9,7 +9,8 @@ Qué tareas muestra (no depende de fechas):
 - Donde eres **responsable**.
 - Solo **hojas** del árbol (las que no tienen subtareas: ahí están las acciones).
   Debajo de cada una se ve de qué tarea padre viene (`↳ Fase 2 › Propuesta`).
-- Con **menos de 90%** de avance y **no canceladas**.
+- Con **menos de 90%** de avance y **no canceladas**. Las de **90% exacto** se
+  cuentan como aprobadas y se ven con su KPI.
 
 Requiere el conector de Taskia conectado en la sesión, llamado `Taskia` o
 `MCP_TASKIA` (sin distinguir mayúsculas). El panel solo lee de ese: cualquier
@@ -81,5 +82,12 @@ Si se te olvida, el panel muestra este mismo aviso en lugar de las tareas.
 
 - El panel **Taskia · Hoy** se abre solo al iniciar la sesión.
 - `/taskia` lo abre y lo recarga.
+- Arriba, los workspaces: marca uno o varios (☑) y el panel muestra solo esos;
+  **Todos** quita la selección. Se recuerda para la próxima sesión.
+- Debajo, los KPIs de lo elegido; el marcado (▸) filtra la lista:
+  - **Pendientes:** menos de 90%.
+  - **Nuevas:** menos de 60%.
+  - **Devueltas:** exactamente 60%.
+  - **Aprobadas:** exactamente 90% (no salen en la lista de pendientes).
 - Un grupo por workspace; el de más tareas sale abierto, los demás se abren con un clic.
 - ▶ = Claude puede hacerla sola · ○ = solo preparar.

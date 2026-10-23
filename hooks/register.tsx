@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { TaskiaLoad, TaskiaTask } from '../types'
+import type { TaskiaKpi, TaskiaLoad, TaskiaTask } from '../types'
 
 const PANE = 'taskia-hoy'
 const SEARCH = 'agent_search_tasks'
@@ -19,6 +19,18 @@ const AUTO_MODE_HELP =
 let profile = ''
 // Una tarea con este avance o más ya se da por hecha y no se muestra.
 const DONE_PCT = 90
+// El avance marca el estado en el flujo del equipo: en 60% la tarea volvió, en 90% se aprobó.
+const NEW_PCT = 60
+const RETURNED_PCT = 60
+const APPROVED_PCT = 90
+const KPIS: { id: TaskiaKpi; label: string; test: (pct: number) => boolean }[] = [
+  { id: 'pending', label: 'Pendientes', test: p => p < DONE_PCT },
+  { id: 'new', label: 'Nuevas', test: p => p < NEW_PCT },
+  { id: 'returned', label: 'Devueltas', test: p => p === RETURNED_PCT },
+  { id: 'approved', label: 'Aprobadas', test: p => p === APPROVED_PCT },
+]
+// Clave en $.store de los workspaces elegidos, para recordarlos entre sesiones.
+const SELECTED_KEY = 'selected'
 // Topes para no hacer demasiadas llamadas a Taskia en cuentas grandes.
 const MAX = 60
 const MAX_PAGES = 6
@@ -33,6 +45,10 @@ const updatedAt = atom({ plugin: 'taskia-hoy', key: 'updatedAt' } as const, '')
 const brief = atom({ plugin: 'taskia-hoy', key: 'brief' } as const, '')
 // Workspaces que la persona abrió o cerró a mano; de entrada solo el primero está abierto.
 const flipped = atom({ plugin: 'taskia-hoy', key: 'flipped' } as const, [] as string[])
+// Workspaces elegidos; vacío es todos.
+const selected = atom({ plugin: 'taskia-hoy', key: 'selected' } as const, [] as string[])
+// KPI que filtra la lista.
+const kpi = atom({ plugin: 'taskia-hoy', key: 'kpi' } as const, 'pending' as TaskiaKpi)
 
 type Raw = {
   task_ref: string
@@ -46,9 +62,11 @@ type Raw = {
 
 const pct = (t: Raw) => (typeof t.accomplishment === 'number' ? Math.max(0, Math.round(t.accomplishment)) : 0)
 
-// Lo que Claude puede trabajar: tareas hoja (las que tienen acciones), por debajo del
-// DONE_PCT y no canceladas. El estado de cancelación se llama distinto según el workspace.
-const isPending = (t: Raw) => !t.has_child_tasks && pct(t) < DONE_PCT && !/cancel/i.test(t.status ?? '')
+// Lo que cuenta en el panel: tareas hoja (las que tienen acciones) y no canceladas,
+// pendientes (bajo DONE_PCT) o recién aprobadas (en APPROVED_PCT, solo para su KPI).
+// El estado de cancelación se llama distinto según el workspace.
+const isTracked = (t: Raw) =>
+  !t.has_child_tasks && (pct(t) < DONE_PCT || pct(t) === APPROVED_PCT) && !/cancel/i.test(t.status ?? '')
 
 // Posición del nombre en CONNECTORS (sin distinguir mayúsculas), o -1 si no es de Taskia.
 const rank = (name: string) => CONNECTORS.findIndex(c => c.toLowerCase() === name.toLowerCase())
@@ -147,7 +165,7 @@ async function fetchTasks($: any): Promise<{ list: TaskiaTask[]; tools: string[]
   const server = found.server
   if (!server) throw new Error(`no hay un conector llamado ${CONNECTORS.join(' o ')} conectado en esta sesión`)
 
-  const pending = (await searchAll($, server, { mine: true })).filter(isPending)
+  const pending = (await searchAll($, server, { mine: true })).filter(isTracked)
   const paths = await parentPaths($, server, pending)
 
   // Workspaces con más tareas primero; dentro, por estado y luego por avance.
@@ -160,7 +178,8 @@ async function fetchTasks($: any): Promise<{ list: TaskiaTask[]; tools: string[]
     order(a.status) - order(b.status) ||
     pct(b) - pct(a))
 
-  const list: TaskiaTask[] = pending.slice(0, MAX).map(t => ({
+  // Todas, para que los KPIs cuenten bien; el modelo solo ve las primeras MAX pendientes.
+  const list: TaskiaTask[] = pending.map(t => ({
     ref: String(t.task_ref),
     name: t.name,
     workspace: t.workspace_name || 'Sin workspace',
@@ -176,8 +195,9 @@ async function fetchTasks($: any): Promise<{ list: TaskiaTask[]; tools: string[]
 // Lo que sale del modelo: el resumen y, por tarea, qué hacer ya y si Claude puede avanzarla.
 // El perfil viene de la opción "perfil"; vacía, el modelo lo deduce de las tareas.
 // Si el modelo no responde o responde mal, las tareas quedan sin resumen ni consejo.
-async function classify($: any, base: TaskiaTask[], tools: string[]): Promise<{ list: TaskiaTask[]; brief: string }> {
-  if (base.length === 0) return { list: base, brief: '' }
+async function classify($: any, all: TaskiaTask[], tools: string[]): Promise<{ list: TaskiaTask[]; brief: string }> {
+  const base = all.filter(t => t.pct < DONE_PCT).slice(0, MAX)
+  if (base.length === 0) return { list: all, brief: '' }
 
   const prompt =
     `Estas son las tareas pendientes en Taskia de ` +
@@ -195,7 +215,7 @@ async function classify($: any, base: TaskiaTask[], tools: string[]): Promise<{ 
     JSON.stringify(base.map(t => ({ ref: t.ref, name: t.name, ws: t.workspace, path: t.path, status: t.status, pct: t.pct })))
 
   const r = await $.model.complete({ model: 'haiku', prompt, maxTokens: 4000, effort: 'low', timeoutMs: 45000 })
-  if (!r.isAnswered) return { list: base, brief: '' }
+  if (!r.isAnswered) return { list: all, brief: '' }
   try {
     // Normalmente llega el objeto; si el modelo devuelve solo la lista, se acepta igual.
     const text: string = r.text
@@ -207,14 +227,14 @@ async function classify($: any, base: TaskiaTask[], tools: string[]): Promise<{ 
       : JSON.parse(text.slice(brace, text.lastIndexOf('}') + 1))
     const out: any[] = obj.tasks ?? []
     const byRef = new Map(out.map(o => [String(o.ref), o]))
-    const list = base.map(t => {
+    const list = all.map(t => {
       const o = byRef.get(t.ref)
       if (!o) return t
       return { ...t, advice: String(o.advice ?? ''), canDo: o.canDo === true }
     })
     return { list, brief: typeof obj.brief === 'string' ? obj.brief : '' }
   } catch {
-    return { list: base, brief: '' }
+    return { list: all, brief: '' }
   }
 }
 
@@ -240,6 +260,12 @@ function toggle($: any, ws: string) {
   return update($, flipped, (cur: string[]) => (cur.includes(ws) ? cur.filter(g => g !== ws) : [...cur, ws]))
 }
 
+// Marca o desmarca un workspace (null: todos) y lo guarda para la próxima sesión.
+async function choose($: any, ws: string | null) {
+  await update($, selected, (cur: string[]) => (ws === null ? [] : cur.includes(ws) ? cur.filter(g => g !== ws) : [...cur, ws]))
+  await $.store.set(SELECTED_KEY, await read($, selected))
+}
+
 function startPrompt(t: TaskiaTask): string {
   return (
     `Quiero trabajar la tarea de Taskia #${t.ref} "${t.name}" (workspace ${t.workspace}` +
@@ -259,6 +285,8 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'taskia', description: 'Abre el panel de tareas de Taskia y lo recarga' })
+    const saved = await $.store.get(SELECTED_KEY)
+    if (Array.isArray(saved)) await update($, selected, () => saved.map(String))
     void $.ui.open({ id: PANE, title: 'Taskia · Hoy' })
     void refresh($)
     return next(e)
@@ -278,18 +306,27 @@ export const register: Register = (on, options) => {
     const at = await read($, updatedAt)
     const summary = await read($, brief)
     const toggled = await read($, flipped)
+    const chosen = await read($, selected)
+    const filter = await read($, kpi)
 
     // La lista ya viene ordenada: los workspaces salen en el orden en que aparecen.
     const workspaces = [...new Set(list.map(t => t.workspace))]
-    const groups = workspaces.map(ws => ({ ws, items: list.filter(t => t.workspace === ws) }))
-    const doable = list.filter(t => t.canDo).length
+    // Los elegidos que siguen teniendo tareas; si no queda ninguno, todos.
+    const picked = workspaces.filter(ws => chosen.includes(ws))
+    const all = picked.length === 0
+    const scoped = all ? list : list.filter(t => picked.includes(t.workspace))
+    const test = (KPIS.find(k => k.id === filter) ?? KPIS[0]).test
+    const shown = scoped.filter(t => test(t.pct))
+    const groups = [...new Set(shown.map(t => t.workspace))].map(ws => ({ ws, items: shown.filter(t => t.workspace === ws) }))
+    const doable = shown.filter(t => t.canDo).length
+    const pendingCount = list.filter(t => t.pct < DONE_PCT).length
 
     return (
       <Box flexDirection="column" gap={1}>
         {/* Encabezado: estado y recarga en una sola línea */}
         <Box flexDirection="row" justifyContent="space-between" alignItems="center">
           <Text dimColor size="caption">
-            {state === 'loading' ? 'Cargando tus tareas…' : state !== 'error' && at ? `${list.length} tareas · ${at}` : ''}
+            {state === 'loading' ? 'Cargando tus tareas…' : state !== 'error' && at ? `${pendingCount} pendientes · ${at}` : ''}
           </Text>
           <Button key="reload" label="↻ Recargar" dimColor onPress={() => void refresh($)} />
         </Box>
@@ -297,12 +334,37 @@ export const register: Register = (on, options) => {
         {state === 'error' && <Text color="red" wrap="wrap">No pude leer Taskia: {err}</Text>}
         {state === 'ready' && list.length === 0 && <Text>No tienes tareas pendientes.</Text>}
 
+        {/* Workspaces: se pueden marcar varios; ninguno marcado es todos */}
+        {state !== 'error' && list.length > 0 && (
+          <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+            <Button key="ws-all" plain dimColor={!all} onPress={() => void choose($, null)}>
+              {all ? '◉ Todos' : '○ Todos'}
+            </Button>
+            {workspaces.map(ws => (
+              <Button key={`ws-${ws}`} plain dimColor={!picked.includes(ws)} onPress={() => void choose($, ws)}>
+                {picked.includes(ws) ? `☑ ${ws}` : `☐ ${ws}`}
+              </Button>
+            ))}
+          </Box>
+        )}
+
+        {/* KPIs de lo elegido; el marcado filtra la lista */}
+        {state !== 'error' && list.length > 0 && (
+          <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+            {KPIS.map(k => (
+              <Button key={`k-${k.id}`} plain dimColor={k.id !== filter} onPress={() => void update($, kpi, () => k.id)}>
+                {k.id === filter ? '▸ ' : ''}{k.label} <Text weight="semibold">{String(scoped.filter(t => k.test(t.pct)).length)}</Text>
+              </Button>
+            ))}
+          </Box>
+        )}
+
         {/* Resumen; con error no se muestra lo de la carga anterior */}
         {state !== 'error' && list.length > 0 && (
           <Box flexDirection="column">
             {summary !== '' && <Text wrap="wrap">{summary}</Text>}
             <Text dimColor size="caption" wrap="wrap">
-              {`${groups.length} workspaces`}
+              {shown.length === 0 ? 'Nada en esta selección' : `${groups.length} workspaces`}
               {doable > 0 ? ` · ▶ ${doable} las puedo hacer yo` : ''}
             </Text>
           </Box>

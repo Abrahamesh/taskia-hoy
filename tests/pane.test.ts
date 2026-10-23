@@ -2,7 +2,8 @@ import { expect, test } from 'claude-code/testing'
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-// Mis tareas (mine: true). Pendientes: 1, 2 y 8. Fuera: 5 tiene hijas, 6 va por 95%, 7 está cancelada.
+// Mis tareas (mine: true). Pendientes: 1, 2, 8 y 9 (devuelta, 60%). Aprobada: 10 (90%), solo cuenta en su KPI.
+// Fuera: 5 tiene hijas, 6 va por 95%, 7 está cancelada.
 const mine = [
   { task_ref: '1', name: 'Rediseño del flujo de compras con un nombre bastante largo para ver que no se corta', workspace_name: 'Cliente A', status: 'Por hacer', has_child_tasks: false },
   { task_ref: '2', name: 'Ordenar gastos', workspace_name: 'Interno', status: 'En progreso', accomplishment: 50, has_child_tasks: false },
@@ -10,6 +11,8 @@ const mine = [
   { task_ref: '6', name: 'Casi lista', workspace_name: 'Cliente A', status: 'En progreso', accomplishment: 95, has_child_tasks: false },
   { task_ref: '7', name: 'Ya no va', workspace_name: 'Cliente A', status: 'Cancelada', has_child_tasks: false },
   { task_ref: '8', name: 'Revisar inventario', workspace_name: 'Cliente A', status: 'En progreso', accomplishment: 30, has_child_tasks: false },
+  { task_ref: '9', name: 'Corregir cotización', workspace_name: 'Cliente A', status: 'Por revisar', accomplishment: 60, has_child_tasks: false },
+  { task_ref: '10', name: 'Manual de bienvenida', workspace_name: 'Interno', status: 'Por revisar', accomplishment: 90, has_child_tasks: false },
 ]
 // Todo el workspace (mine: false): la fase 4 es de otra persona y de ella cuelga la propuesta.
 const workspace: Record<string, any[]> = {
@@ -115,7 +118,7 @@ async function classifyInput($: any, on: any): Promise<{ prompt: string; tasks: 
 
 test('arma el camino desde los padres, aunque no sean míos, y ordena por workspace y estado', async ($, on) => {
   const { tasks } = await classifyInput($, on)
-  expect(tasks.map((t: any) => t.ref)).toEqual(['8', '1', '2'])
+  expect(tasks.map((t: any) => t.ref)).toEqual(['8', '9', '1', '2'])
   expect(tasks.find((t: any) => t.ref === '1').path).toBe('Fase 2 › 3. Propuesta')
   expect(tasks.find((t: any) => t.ref === '8').path).toBe('Fase 2')
   expect(tasks.find((t: any) => t.ref === '2').path).toBe('')
@@ -175,4 +178,42 @@ test('modo auto: si bloquea la lectura, dice qué permisos agregar', async ($, o
   const err = await waitFor(() => ui.find({ text: /modo auto bloqueó/ }))
   expect(err?.text).toContain('agent_search_tasks y agent_list_task_children')
   expect(await ui.find({ text: /refused/ })).toBeUndefined()
+})
+
+// KPIs por workspace elegido: el marcado filtra la lista y la elección se guarda.
+test('desktop: KPIs de los workspaces elegidos, filtran la lista y se recuerdan', async ($, on) => {
+  const store = new Map<string, unknown>()
+  on('store.set', async (_$: any, e: any) => { store.set(e.key, e.value); return { value: undefined } as any })
+  mockTaskia(on, [])
+  on('model.complete', async () => ({ value: { isAnswered: false } }) as any)
+  await $.command.run({ command: 'taskia', args: '' } as any)
+  const ui = await $.ui.mount({ plugin: 'taskia-hoy', surface: 'desktop', component: 'Pane', requestId: 'taskia-hoy', props: { title: 'Taskia · Hoy' } as any })
+  const kpi = async (id: string) => (await ui.find({ key: `k-${id}` }))?.text ?? ''
+
+  // Todos: 4 pendientes (1, 2, 8, 9), 3 nuevas, 1 devuelta, 1 aprobada.
+  expect(await waitFor(() => ui.find({ key: 't-1' }))).toBeDefined()
+  expect(await kpi('pending')).toContain('4')
+  expect(await kpi('new')).toContain('3')
+  expect(await kpi('returned')).toContain('1')
+  expect(await kpi('approved')).toContain('1')
+  expect(await ui.find({ key: 't-10' })).toBeUndefined()
+
+  // Solo Interno: 1 pendiente, 1 nueva, 0 devueltas, 1 aprobada.
+  await ui.press({ key: 'ws-Interno' })
+  expect(await waitFor(async () => ((await kpi('pending')).includes('1') ? true : undefined))).toBe(true)
+  expect(await kpi('returned')).toContain('0')
+  expect(store.get('selected')).toEqual(['Interno'])
+
+  // Aprobadas muestra la de 90%; Devueltas en Cliente A + Interno muestra la de 60%.
+  await ui.press({ key: 'k-approved' })
+  expect(await waitFor(() => ui.find({ key: 't-10' }))).toBeDefined()
+  await ui.press({ key: 'ws-Cliente A' })
+  await ui.press({ key: 'k-returned' })
+  expect(await waitFor(() => ui.find({ key: 't-9' }))).toBeDefined()
+  expect(await ui.find({ key: 't-10' })).toBeUndefined()
+  expect(store.get('selected')).toEqual(['Interno', 'Cliente A'])
+
+  // Todos limpia la elección.
+  await ui.press({ key: 'ws-all' })
+  expect(store.get('selected')).toEqual([])
 })

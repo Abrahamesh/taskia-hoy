@@ -1,7 +1,7 @@
 {
   "name": "taskia-hoy",
-  "version": "0.4.3",
-  "description": "Panel lateral con tus tareas pendientes de Taskia por workspace, con recomendación; clic para que Claude la empiece",
+  "version": "0.5.0",
+  "description": "Panel lateral con tus tareas pendientes de Taskia por workspace, con KPIs y filtro de workspaces, recomendación; clic para que Claude la empiece",
   "types": "./types/index.d.ts",
   "userConfig": {
     "perfil": {
