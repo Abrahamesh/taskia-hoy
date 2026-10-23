@@ -33,6 +33,29 @@ El repositorio es privado: solo se instala para quien tenga acceso de lectura en
 GitHub y una credencial de git para github.com en su PC (una llave SSH, o
 `gh auth login` seguido de `gh auth setup-git`).
 
+## Perfil
+
+El panel no supone a qué te dedicas. Al clasificar las tareas:
+
+- **Rol:** lo deduce de los workspaces y los nombres de tus tareas. Si quieres
+  afinarlo, llena la opción **Perfil** del mod (ej.: "coordinador de flota de
+  Hidrocaven").
+- **▶ "la hago yo":** solo marca las tareas que Claude puede avanzar con los
+  conectores que tengas conectados en esa sesión.
+
+La opción se pide al instalar el mod. Para cambiarla después, en
+`~/.claude/settings.json`:
+
+```json
+"pluginConfigs": {
+  "taskia-hoy@taskia-hoy": { "options": { "perfil": "coordinador de flota de Hidrocaven" } }
+}
+```
+
+Ese archivo es de tu usuario de Windows, no de tu cuenta de Claude: si usas dos
+cuentas de Claude en la misma PC, las dos comparten el perfil. Ahí conviene
+dejarlo vacío.
+
 ## Modo auto
 
 En modo auto, el revisor de permisos bloquea las llamadas que hace el panel por su
