@@ -4,62 +4,51 @@ import type { Register } from 'claude-code'
 import type { TaskiaLoad, TaskiaTask } from '../types'
 
 const PANE = 'taskia-hoy'
-const TOOL = 'agent_what_to_do_today'
+const SEARCH = 'agent_search_tasks'
+const CHILDREN = 'agent_list_task_children'
 // Nombres que puede tener el conector de Taskia en claude.ai, por preferencia.
 const CONNECTORS = ['MCP_TASKIA', 'Taskia']
 const CONNECTORS_SERVER = 'ccd_connectors'
 const CONNECTORS_TOOL = 'session_connectors_status'
+// En modo auto el panel solo puede leer Taskia si estas herramientas están permitidas.
+const AUTO_MODE_HELP =
+  'el modo auto bloqueó la lectura. Pega esto en el chat: "Agrega a permissions.allow de mi ' +
+  `~/.claude/settings.json ${SEARCH} y ${CHILDREN} de mi conector de Taskia (Taskia o MCP_TASKIA, ` +
+  'no el de dev) con su ID real, como mcp__<id>__<herramienta>. No borres nada." Luego abre una sesión nueva.'
 // Quién usa el panel, de la opción "perfil" del mod; se fija al cargar el módulo.
 let profile = ''
-const MAX = 30
-const GROUPS = ['Urgente hoy', 'Vencida reciente', 'En curso', 'Vieja / revisar si sigue']
-// Nombre corto de cada grupo para la fila de conteos del resumen.
-const SHORT: Record<string, string> = {
-  'Urgente hoy': 'urgentes',
-  'Vencida reciente': 'vencidas',
-  'En curso': 'en curso',
-  'Vieja / revisar si sigue': 'viejas',
-}
-// Al abrir el panel solo se despliegan las vencidas; el resto se abre con un clic.
-const OPEN_BY_DEFAULT = ['Vencida reciente']
+// Una tarea con este avance o más ya se da por hecha y no se muestra.
+const DONE_PCT = 90
+// Topes para no hacer demasiadas llamadas a Taskia en cuentas grandes.
+const MAX = 60
+const MAX_PAGES = 6
+const MAX_PARENTS = 60
+// Orden dentro de cada workspace: lo que ya está en marcha primero.
+const STATUS_ORDER = ['En progreso', 'Por revisar', 'Por hacer', 'Ideas']
 
 const tasks = atom({ plugin: 'taskia-hoy', key: 'tasks' } as const, [] as TaskiaTask[])
 const load = atom({ plugin: 'taskia-hoy', key: 'load' } as const, 'idle' as TaskiaLoad)
 const error = atom({ plugin: 'taskia-hoy', key: 'error' } as const, '')
 const updatedAt = atom({ plugin: 'taskia-hoy', key: 'updatedAt' } as const, '')
 const brief = atom({ plugin: 'taskia-hoy', key: 'brief' } as const, '')
-const open = atom({ plugin: 'taskia-hoy', key: 'open' } as const, OPEN_BY_DEFAULT as string[])
+// Workspaces que la persona abrió o cerró a mano; de entrada solo el primero está abierto.
+const flipped = atom({ plugin: 'taskia-hoy', key: 'flipped' } as const, [] as string[])
 
 type Raw = {
   task_ref: string
   name: string
   workspace_name?: string
-  estimatedduedate?: string
   status?: string
   accomplishment?: number
-  priority?: string
-  urgency?: string
+  responsible_name?: string
+  has_child_tasks?: boolean
 }
 
-const today = () => new Date().toISOString().slice(0, 10)
-const day = (s?: string) => (s ? s.slice(0, 10) : '')
+const pct = (t: Raw) => (typeof t.accomplishment === 'number' ? Math.max(0, Math.round(t.accomplishment)) : 0)
 
-// "hoy", "hace 3d", "hace 4m", "en 2d": más corto que la fecha completa.
-function relDue(due: string): string {
-  if (!due) return ''
-  const d = Math.round((Date.parse(today()) - Date.parse(due)) / 86400000)
-  if (d === 0) return 'hoy'
-  if (d < 0) return `en ${-d}d`
-  return d > 60 ? `hace ${Math.round(d / 30)}m` : `hace ${d}d`
-}
-
-function fallbackGroup(t: Raw): string {
-  const due = day(t.estimatedduedate)
-  if (!due) return 'En curso'
-  if (due === today()) return 'Urgente hoy'
-  const ageDays = (Date.parse(today()) - Date.parse(due)) / 86400000
-  return ageDays > 60 ? 'Vieja / revisar si sigue' : 'Vencida reciente'
-}
+// Lo que Claude puede trabajar: tareas hoja (las que tienen acciones), por debajo del
+// DONE_PCT y no canceladas. El estado de cancelación se llama distinto según el workspace.
+const isPending = (t: Raw) => !t.has_child_tasks && pct(t) < DONE_PCT && !/cancel/i.test(t.status ?? '')
 
 // Posición del nombre en CONNECTORS (sin distinguir mayúsculas), o -1 si no es de Taskia.
 const rank = (name: string) => CONNECTORS.findIndex(c => c.toLowerCase() === name.toLowerCase())
@@ -86,10 +75,8 @@ async function sessionConnectors($: any): Promise<{ server?: string; names: stri
     return { server, names: usefulNames([...servers].map(s => s.replace(/^claude_ai_/, '').replace(/_/g, ' '))) }
   }
   // En la app de escritorio el servidor es un ID: el nombre se busca en la lista de conectores.
-  const res = await $.mcp.call(CONNECTORS_SERVER, CONNECTORS_TOOL, {})
-  if (res.isError) throw new Error('no pude leer la lista de conectores de la app')
-  const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
-  const rows: any[] = (JSON.parse(text).servers ?? []).filter((r: any) => r.status === 'connected')
+  const rows: any[] = ((await callJson($, CONNECTORS_SERVER, CONNECTORS_TOOL, {})).servers ?? [])
+    .filter((r: any) => r.status === 'connected')
   const id = pick(rows.filter(r => servers.has(r.id)), r => String(r.name))?.id
   return {
     server: id && servers.has(id) ? String(id) : undefined,
@@ -102,54 +89,110 @@ function usefulNames(names: string[]): string[] {
   return [...new Set(names.map(n => n.trim()).filter(n => n !== '' && !/taskia|^ccd /i.test(n)))]
 }
 
+async function callJson($: any, server: string, tool: string, args: Record<string, unknown>): Promise<any> {
+  const res = await $.mcp.call(server, tool, args)
+  if (res.isError) throw new Error(server === CONNECTORS_SERVER ? 'no pude leer la lista de conectores de la app' : 'el conector de Taskia respondió con error')
+  return JSON.parse(res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join(''))
+}
+
+// Todas las páginas de una búsqueda, hasta MAX_PAGES.
+async function searchAll($: any, server: string, args: Record<string, unknown>): Promise<Raw[]> {
+  const out: Raw[] = []
+  for (let page = 0, offset = 0; page < MAX_PAGES; page++) {
+    const data = await callJson($, server, SEARCH, { ...args, limit: 50, offset })
+    out.push(...((data.items ?? []) as Raw[]))
+    if (!data.pagination?.has_more) break
+    offset = data.pagination.next_offset ?? offset + 50
+  }
+  return out
+}
+
+// Taskia no dice de qué tarea cuelga cada una: se recorren los padres de los
+// workspaces donde hay tareas pendientes y se arma "Fase › Entregable" por tarea.
+// Si algo falla aquí, las tareas se muestran igual, sin ese camino.
+async function parentPaths($: any, server: string, pending: Raw[]): Promise<Map<string, string>> {
+  const paths = new Map<string, string>()
+  try {
+    const workspaces = [...new Set(pending.map(t => t.workspace_name ?? '').filter(Boolean))]
+    const all = (await Promise.all(workspaces.map(ws =>
+      searchAll($, server, { mine: false, workspace: ws }).then(items => items.filter(t => t.workspace_name === ws)),
+    ))).flat()
+    const names = new Map(all.map(t => [String(t.task_ref), t.name]))
+    const parents = all.filter(t => t.has_child_tasks).slice(0, MAX_PARENTS)
+    const parentOf = new Map<string, string>()
+    await Promise.all(parents.map(async p => {
+      const data = await callJson($, server, CHILDREN, { task_ref: String(p.task_ref), workspace: p.workspace_name, limit: 100 })
+      for (const c of data.children ?? []) parentOf.set(String(c.task_ref), String(p.task_ref))
+    }))
+    for (const t of pending) {
+      const chain: string[] = []
+      for (let ref = parentOf.get(String(t.task_ref)); ref && chain.length < 4; ref = parentOf.get(ref)) {
+        chain.unshift(names.get(ref) ?? '')
+      }
+      if (chain.length > 0) paths.set(String(t.task_ref), chain.filter(Boolean).join(' › '))
+    }
+  } catch {
+    // Sin camino: no impide mostrar las tareas.
+  }
+  return paths
+}
+
 // Al iniciar la sesión los MCP pueden tardar en conectar: se espera hasta ~30 s.
-async function fetchTasks($: any): Promise<{ raw: Raw[]; tools: string[] }> {
+async function fetchTasks($: any): Promise<{ list: TaskiaTask[]; tools: string[] }> {
   let found: { server?: string; names: string[] } = { names: [] }
   for (let i = 0; i < 10 && !found.server; i++) {
     found = await sessionConnectors($)
     if (!found.server) await $.clock.sleep(3000)
   }
-  if (!found.server) throw new Error(`no hay un conector llamado ${CONNECTORS.join(' o ')} conectado en esta sesión`)
-  const res = await $.mcp.call(found.server, TOOL, { limit: 50, include_overdue: true })
-  if (res.isError) throw new Error('el conector de Taskia respondió con error')
-  const text = res.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('')
-  return { raw: (JSON.parse(text).items ?? []) as Raw[], tools: found.names }
-}
+  const server = found.server
+  if (!server) throw new Error(`no hay un conector llamado ${CONNECTORS.join(' o ')} conectado en esta sesión`)
 
-// Lo que sale del modelo: el resumen del día y la clasificación de cada tarea.
-// El perfil viene de la opción "perfil"; vacía, el modelo lo deduce de las tareas.
-// Si el modelo no responde o responde mal, quedan los grupos por fecha y sin resumen.
-async function classify($: any, raw: Raw[], tools: string[]): Promise<{ list: TaskiaTask[]; brief: string }> {
-  const base: TaskiaTask[] = raw.slice(0, MAX).map(t => ({
+  const pending = (await searchAll($, server, { mine: true })).filter(isPending)
+  const paths = await parentPaths($, server, pending)
+
+  // Workspaces con más tareas primero; dentro, por estado y luego por avance.
+  const count = new Map<string, number>()
+  for (const t of pending) count.set(t.workspace_name ?? '', (count.get(t.workspace_name ?? '') ?? 0) + 1)
+  const order = (s?: string) => { const i = STATUS_ORDER.indexOf(s ?? ''); return i < 0 ? STATUS_ORDER.length : i }
+  pending.sort((a, b) =>
+    (count.get(b.workspace_name ?? '') ?? 0) - (count.get(a.workspace_name ?? '') ?? 0) ||
+    (a.workspace_name ?? '').localeCompare(b.workspace_name ?? '') ||
+    order(a.status) - order(b.status) ||
+    pct(b) - pct(a))
+
+  const list: TaskiaTask[] = pending.slice(0, MAX).map(t => ({
     ref: String(t.task_ref),
     name: t.name,
-    workspace: t.workspace_name ?? '',
-    due: day(t.estimatedduedate),
+    workspace: t.workspace_name || 'Sin workspace',
+    path: paths.get(String(t.task_ref)) ?? '',
     status: t.status ?? '',
-    group: fallbackGroup(t),
-    summary: '',
+    pct: pct(t),
     advice: '',
     canDo: false,
   }))
+  return { list, tools: found.names }
+}
+
+// Lo que sale del modelo: el resumen y, por tarea, qué hacer ya y si Claude puede avanzarla.
+// El perfil viene de la opción "perfil"; vacía, el modelo lo deduce de las tareas.
+// Si el modelo no responde o responde mal, las tareas quedan sin resumen ni consejo.
+async function classify($: any, base: TaskiaTask[], tools: string[]): Promise<{ list: TaskiaTask[]; brief: string }> {
   if (base.length === 0) return { list: base, brief: '' }
 
   const prompt =
-    `Hoy es ${today()}. Clasifica estas tareas de Taskia de ` +
+    `Estas son las tareas pendientes en Taskia de ` +
     (profile !== ''
       ? `esta persona: ${profile}.\n`
       : `una persona cuyo rol no conoces: dedúcelo de los workspaces y los nombres de las tareas.\n`) +
-    `Grupos válidos: ${GROUPS.join(' | ')}.\n` +
+    `Su equipo casi no usa fechas: prioriza por estado, avance y lo que dice cada tarea, no por vencimiento.\n` +
+    `"path" es de qué tarea padre viene cada una.\n` +
     `Devuelve SOLO un objeto JSON, sin texto extra, con esta forma:\n` +
-    `{"brief": "...", "tasks": [{"ref", "group", "summary", "advice", "canDo"}]}\n` +
-    `- brief: máx 25 palabras, en tono directo, qué es lo más importante hoy y por dónde empezar.\n` +
-    `- summary: máx 12 palabras, qué es la tarea.\n` +
+    `{"brief": "...", "tasks": [{"ref", "advice", "canDo"}]}\n` +
+    `- brief: máx 25 palabras, en tono directo, por dónde empezar y por qué.\n` +
     `- advice: máx 12 palabras, qué hacer ya.\n` +
     `- canDo: true solo si un asistente que lee y escribe archivos y tiene estos conectores puede avanzarla sin la persona: ` +
     `${tools.length > 0 ? tools.join(', ') : 'ninguno'}. Si la tarea pide algo fuera de eso (reuniones, visitas, llamadas, sistemas no conectados), false.\n\n` +
-    JSON.stringify(raw.slice(0, MAX).map(t => ({
-      ref: t.task_ref, name: t.name, ws: t.workspace_name, due: day(t.estimatedduedate),
-      status: t.status, pct: t.accomplishment, prio: t.priority, urg: t.urgency,
-    })))
+    JSON.stringify(base.map(t => ({ ref: t.ref, name: t.name, ws: t.workspace, path: t.path, status: t.status, pct: t.pct })))
 
   const r = await $.model.complete({ model: 'haiku', prompt, maxTokens: 4000, effort: 'low', timeoutMs: 45000 })
   if (!r.isAnswered) return { list: base, brief: '' }
@@ -167,13 +210,7 @@ async function classify($: any, raw: Raw[], tools: string[]): Promise<{ list: Ta
     const list = base.map(t => {
       const o = byRef.get(t.ref)
       if (!o) return t
-      return {
-        ...t,
-        group: GROUPS.includes(o.group) ? o.group : t.group,
-        summary: String(o.summary ?? ''),
-        advice: String(o.advice ?? ''),
-        canDo: o.canDo === true,
-      }
+      return { ...t, advice: String(o.advice ?? ''), canDo: o.canDo === true }
     })
     return { list, brief: typeof obj.brief === 'string' ? obj.brief : '' }
   } catch {
@@ -184,25 +221,29 @@ async function classify($: any, raw: Raw[], tools: string[]): Promise<{ list: Ta
 async function refresh($: any) {
   await update($, load, () => 'loading' as TaskiaLoad)
   try {
-    const { raw, tools } = await fetchTasks($)
-    const { list, brief: text } = await classify($, raw, tools)
+    const { list: base, tools } = await fetchTasks($)
+    const { list, brief: text } = await classify($, base, tools)
     await update($, tasks, () => list)
     await update($, brief, () => text)
     await update($, updatedAt, () => new Date().toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' }))
     await update($, load, () => 'ready' as TaskiaLoad)
   } catch (err) {
-    await update($, error, () => String((err as Error)?.message ?? err))
+    const msg = String((err as Error)?.message ?? err)
+    // En modo auto, una llamada que la persona no pidió se rechaza salvo que esté
+    // en su lista de permisos: se dice en español qué agregar.
+    await update($, error, () => (/refused|auto mode/i.test(msg) ? AUTO_MODE_HELP : msg))
     await update($, load, () => 'error' as TaskiaLoad)
   }
 }
 
-function toggle($: any, group: string) {
-  return update($, open, (cur: string[]) => (cur.includes(group) ? cur.filter(g => g !== group) : [...cur, group]))
+function toggle($: any, ws: string) {
+  return update($, flipped, (cur: string[]) => (cur.includes(ws) ? cur.filter(g => g !== ws) : [...cur, ws]))
 }
 
 function startPrompt(t: TaskiaTask): string {
   return (
-    `Quiero trabajar la tarea de Taskia #${t.ref} "${t.name}" (workspace ${t.workspace}).\n` +
+    `Quiero trabajar la tarea de Taskia #${t.ref} "${t.name}" (workspace ${t.workspace}` +
+    `${t.path ? `, dentro de ${t.path}` : ''}).\n` +
     `NO ejecutes nada todavía: solo lee y propón.\n` +
     `1) Léela completa con agent_get_task, sus comentarios (agent_list_task_comments) y subtareas si tiene.\n` +
     `2) Dime en 2-3 líneas qué entiendes que hay que hacer.\n` +
@@ -236,9 +277,11 @@ export const register: Register = (on, options) => {
     const err = await read($, error)
     const at = await read($, updatedAt)
     const summary = await read($, brief)
-    const opened = await read($, open)
+    const toggled = await read($, flipped)
 
-    const groups = GROUPS.map(g => ({ g, items: list.filter(t => t.group === g) })).filter(x => x.items.length > 0)
+    // La lista ya viene ordenada: los workspaces salen en el orden en que aparecen.
+    const workspaces = [...new Set(list.map(t => t.workspace))]
+    const groups = workspaces.map(ws => ({ ws, items: list.filter(t => t.workspace === ws) }))
     const doable = list.filter(t => t.canDo).length
 
     return (
@@ -246,45 +289,47 @@ export const register: Register = (on, options) => {
         {/* Encabezado: estado y recarga en una sola línea */}
         <Box flexDirection="row" justifyContent="space-between" alignItems="center">
           <Text dimColor size="caption">
-            {state === 'loading' ? 'Cargando y clasificando…' : at ? `${list.length} tareas · ${at}` : ''}
+            {state === 'loading' ? 'Cargando tus tareas…' : state !== 'error' && at ? `${list.length} tareas · ${at}` : ''}
           </Text>
           <Button key="reload" label="↻ Recargar" dimColor onPress={() => void refresh($)} />
         </Box>
 
-        {state === 'error' && <Text color="red">No pude leer Taskia: {err}</Text>}
-        {state === 'ready' && list.length === 0 && <Text>Nada pendiente para hoy.</Text>}
+        {state === 'error' && <Text color="red" wrap="wrap">No pude leer Taskia: {err}</Text>}
+        {state === 'ready' && list.length === 0 && <Text>No tienes tareas pendientes.</Text>}
 
-        {/* Resumen del día */}
-        {list.length > 0 && (
+        {/* Resumen; con error no se muestra lo de la carga anterior */}
+        {state !== 'error' && list.length > 0 && (
           <Box flexDirection="column">
-            {summary !== '' && <Text>{summary}</Text>}
-            <Text dimColor size="caption">
-              {groups.map(x => `${x.items.length} ${SHORT[x.g]}`).join(' · ')}
+            {summary !== '' && <Text wrap="wrap">{summary}</Text>}
+            <Text dimColor size="caption" wrap="wrap">
+              {`${groups.length} workspaces`}
               {doable > 0 ? ` · ▶ ${doable} las puedo hacer yo` : ''}
             </Text>
           </Box>
         )}
 
-        {/* Grupos plegables */}
-        {groups.map(({ g, items }) => {
-          const isOpen = opened.includes(g)
+        {/* Un grupo plegable por workspace; de entrada solo el primero abierto */}
+        {state !== 'error' && groups.map(({ ws, items }, i) => {
+          const isOpen = (i === 0) !== toggled.includes(ws)
           return (
-            <Box key={`box-${g}`} flexDirection="column">
-              <Button key={`g-${g}`} plain onPress={() => void toggle($, g)}>
+            <Box key={`box-${ws}`} flexDirection="column">
+              <Button key={`g-${ws}`} plain onPress={() => void toggle($, ws)}>
                 {isOpen ? '▾ ' : '▸ '}
-                <Text weight="semibold">{g}</Text>
+                <Text weight="semibold">{ws}</Text>
                 <Text dimColor> {items.length}</Text>
               </Button>
               {isOpen && (
                 <Box flexDirection="column" gap={1}>
                   {items.map(t => (
                     <Box key={`row-${t.ref}`} flexDirection="column">
-                      <Button key={`t-${t.ref}`} plain onPress={() => void $.prompt.submit({ text: startPrompt(t) })}>
-                        {t.canDo ? '▶ ' : '○ '}{t.name}
-                      </Button>
-                      <Text dimColor size="caption" wrap="truncate-end">
-                        {[t.workspace, relDue(t.due), t.advice !== '' ? `→ ${t.advice}` : ''].filter(Boolean).join(' · ')}
+                      <Text wrap="wrap">{t.canDo ? '▶ ' : '○ '}{t.name}</Text>
+                      {t.path !== '' && <Text dimColor size="caption" wrap="wrap">↳ {t.path}</Text>}
+                      <Text dimColor size="caption" wrap="wrap">
+                        {[t.status, `${t.pct}%`, t.advice !== '' ? `→ ${t.advice}` : ''].filter(Boolean).join(' · ')}
                       </Text>
+                      <Button key={`t-${t.ref}`} plain dimColor onPress={() => void $.prompt.submit({ text: startPrompt(t) })}>
+                        {t.canDo ? 'Empezar' : 'Preparar'}
+                      </Button>
                     </Box>
                   ))}
                 </Box>
@@ -293,7 +338,7 @@ export const register: Register = (on, options) => {
           )
         })}
 
-        {list.length > 0 && <Text dimColor size="caption">▶ la hago yo · ○ te la preparo · clic para empezar</Text>}
+        {state !== 'error' && list.length > 0 && <Text dimColor size="caption" wrap="wrap">▶ la hago yo · ○ te la preparo · Empezar/Preparar para arrancar</Text>}
       </Box>
     )
   })
