@@ -29,17 +29,13 @@ En la app de escritorio, donde `/plugin` no funciona: clic en **+** junto al
 cuadro del prompt → **Plugins** → **Add marketplace** con `Abrahamesh/taskia-hoy`
 → **Add plugin**.
 
-El repositorio es privado: solo se instala para quien tenga acceso de lectura en
-GitHub y una credencial de git para github.com en su PC (una llave SSH, o
-`gh auth login` seguido de `gh auth setup-git`).
-
 ## Perfil
 
 El panel no supone a qué te dedicas. Al clasificar las tareas:
 
 - **Rol:** lo deduce de los workspaces y los nombres de tus tareas. Si quieres
-  afinarlo, llena la opción **Perfil** del mod (ej.: "coordinador de flota de
-  Hidrocaven").
+  afinarlo, llena la opción **Perfil** del mod (ej.: "coordinador de logística
+  de una empresa de transporte").
 - **▶ "la hago yo":** solo marca las tareas que Claude puede avanzar con los
   conectores que tengas conectados en esa sesión.
 
@@ -48,7 +44,7 @@ La opción se pide al instalar el mod. Para cambiarla después, en
 
 ```json
 "pluginConfigs": {
-  "taskia-hoy@taskia-hoy": { "options": { "perfil": "coordinador de flota de Hidrocaven" } }
+  "taskia-hoy@taskia-hoy": { "options": { "perfil": "coordinador de logística de una empresa de transporte" } }
 }
 ```
 

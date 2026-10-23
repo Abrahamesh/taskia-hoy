@@ -1,8 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 
 const items = [
-  { task_ref: '1', name: 'Flujo n8n cliente', workspace_name: 'Omicron', estimatedduedate: '2026-10-16 00:00:00+00', status: 'En curso' },
-  { task_ref: '2', name: 'Proyecto Farma', workspace_name: 'Farma', estimatedduedate: '2024-09-05 00:00:00+00', status: 'Ideas' },
+  { task_ref: '1', name: 'Flujo n8n cliente', workspace_name: 'Cliente A', estimatedduedate: '2026-10-16 00:00:00+00', status: 'En curso' },
+  { task_ref: '2', name: 'Proyecto viejo', workspace_name: 'Interno', estimatedduedate: '2024-09-05 00:00:00+00', status: 'Ideas' },
 ]
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
@@ -105,8 +105,8 @@ test('sin perfil: deduce el rol y lista solo los conectores conectados', async (
   expect(prompt).not.toContain('TASKIA')
 })
 
-test('con perfil: lo usa tal cual', { options: { perfil: 'coordinador de flota de Hidrocaven' } }, async ($, on) => {
+test('con perfil: lo usa tal cual', { options: { perfil: 'coordinador de logística de una empresa de transporte' } }, async ($, on) => {
   const prompt = await classifyPrompt($, on)
-  expect(prompt).toContain('esta persona: coordinador de flota de Hidrocaven')
+  expect(prompt).toContain('esta persona: coordinador de logística de una empresa de transporte')
   expect(prompt).not.toContain('dedúcelo')
 })

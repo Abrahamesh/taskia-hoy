@@ -7,7 +7,7 @@
     "perfil": {
       "type": "string",
       "title": "Perfil",
-      "description": "Quién usa el panel y a qué se dedica, para clasificar mejor las tareas (ej.: \"coordinador de flota de Hidrocaven\"). Vacío: se deduce de las tareas.",
+      "description": "Quién usa el panel y a qué se dedica, para clasificar mejor las tareas (ej.: \"coordinador de logística de una empresa de transporte\"). Vacío: se deduce de las tareas.",
       "default": ""
     }
   }
